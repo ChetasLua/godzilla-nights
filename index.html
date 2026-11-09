@@ -1,0 +1,163 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Godzilla Nights</title>
+<style>
+  :root { --bg:#07060a; --ink:#e9e4dc; --dim:#8a8378; }
+  * { box-sizing:border-box; margin:0; padding:0; }
+  html,body { height:100%; background:var(--bg); color:var(--ink); overflow:hidden;
+    font:500 12px/1.3 ui-monospace, "SF Mono", Menlo, monospace; letter-spacing:.08em; }
+  #wall { position:absolute; inset:0; display:flex; align-items:center; justify-content:center; gap:var(--gap,14px); padding:28px 20px 44px; }
+  .panel { position:relative; aspect-ratio:1/2; height:100%; max-height:100%; flex:0 0 auto; cursor:zoom-in;
+    border-radius:3px; overflow:hidden; box-shadow:0 30px 80px -20px #000c, 0 0 0 1px #ffffff10;
+    transition:transform .5s cubic-bezier(.2,.8,.2,1), opacity .5s; }
+  .panel canvas { position:absolute; inset:0; width:100%; height:100%; display:block; }
+  .panel:hover { transform:translateY(-4px); }
+  .label { position:absolute; left:0; right:0; bottom:-26px; text-align:center; color:var(--dim); font-size:11px; }
+  body.focus #wall { gap:0; }
+  body.focus .panel { cursor:zoom-out; }
+  body.focus .panel:not(.on) { display:none; }
+  #hud { position:fixed; left:0; right:0; bottom:10px; text-align:center; color:var(--dim); font-size:11px; pointer-events:none; }
+  #hud b { color:var(--ink); font-weight:600; }
+  .panel.loading::after, .panel.err::after { position:absolute; inset:0; display:flex; align-items:center; justify-content:center;
+    text-align:center; padding:20px; color:var(--dim); font-size:11px; background:linear-gradient(#ffffff06,#ffffff02); }
+  .panel.loading::after { content:'drawing…'; animation:pulse 1.2s ease-in-out infinite; }
+  .panel.err::after { content:attr(data-err); color:#e88; }
+  @keyframes pulse { 50% { opacity:.35; } }
+  body.cap { background:#000; }
+  body.cap #wall { padding:0; gap:0; }
+  body.cap .panel { border-radius:0; box-shadow:none; height:100vh; }
+  body.cap .panel:hover { transform:none; }
+  body.cap #hud, body.cap .label { display:none; }
+</style>
+</head>
+<body>
+<div id="wall"></div>
+<div id="hud"><b>GODZILLA NIGHTS</b> &nbsp;·&nbsp; four living posters drawn in code &nbsp;·&nbsp; click a poster to focus &nbsp;·&nbsp; ← → / 1–4 &nbsp;·&nbsp; esc for all</div>
+<script>window.PIECES = [];</script>
+<script src="pieces/common.js"></script>
+<script src="pieces/p1.js"></script>
+<script src="pieces/p2.js"></script>
+<script src="pieces/p3.js"></script>
+<script src="pieces/p4.js"></script>
+<script>
+(() => {
+  const Q = new URLSearchParams(location.search);
+  const CAP = Q.has('cap');               // deterministic still: ?cap&p=1&t=3.2
+  const ONLY = Q.get('p') ? +Q.get('p') : 0;
+  const T0 = Q.get('t') ? +Q.get('t') : 0;
+  if (CAP) document.body.classList.add('cap');
+  const wall = document.getElementById('wall');
+  const list = window.PIECES.map((P, i) => ({ P, i: i + 1 })).filter(o => o.P && (!ONLY || o.i === ONLY));
+  const panels = list.map(({ P, i }) => {
+    const el = document.createElement('div'); el.className = 'panel'; el.dataset.i = i;
+    const cv = document.createElement('canvas'); el.appendChild(cv);
+    if (!CAP) { const l = document.createElement('div'); l.className = 'label'; l.textContent = String(i).padStart(2,'0') + ' — ' + (P.title || ''); el.appendChild(l); }
+    wall.appendChild(el);
+    return { P, i, el, cv, ctx: cv.getContext('2d'), W: 0, H: 0, state: null, visible: true };
+  });
+
+  // ---- poster setup: queued one at a time so the page paints immediately and never blocks ----
+  const queue = [];
+  let pumping = false;
+  function initPanel(p, W) {
+    p.W = W; p.H = W * 2; p.cv.width = W; p.cv.height = p.H;
+    try {
+      const i0 = performance.now(); p.state = p.P.init(p.ctx, W, p.H); window.__INIT = Math.round(performance.now() - i0);
+      p.dead = false; p.el.classList.remove('loading', 'err');
+      if (!CAP) p.P.draw(p.ctx, W, p.H, (performance.now() - (window.__T0 || performance.now())) / 1000, p.state, { x: 0, y: 0 });   // show it at once
+    } catch (e) { p.state = null; p.dead = true; p.el.classList.remove('loading'); p.el.classList.add('err'); p.el.dataset.err = 'poster failed: ' + (e && e.message || e); console.error(e); }
+  }
+  function pump() {
+    if (pumping) return; pumping = true;
+    const step = () => {
+      const job = queue.shift();
+      if (!job) { pumping = false; return; }
+      initPanel(job.p, job.W); job.p.pending = false;
+      setTimeout(step, 16);                       // yield: let the browser paint the poster that just finished
+    };
+    setTimeout(step, 30);                         // timers, not rAF: rAF is paused in hidden/background windows
+  }
+  function targetW(p) {
+    if (CAP) return +(Q.get('w') || 1200);
+    const dpr = Math.min(window.devicePixelRatio || 1, 2);
+    return Math.min(Math.round(p.el.getBoundingClientRect().width * dpr), 1200);
+  }
+  function sizeAll() {
+    for (const p of panels) {
+      if (!p.visible && !CAP) continue;
+      const W = targetW(p);
+      if (W < 64) continue;                        // zero-size / hidden frame: wait for a real size
+      if (CAP) { if (W !== p.W || !p.state) initPanel(p, W); continue; }
+      const close = p.state && Math.abs(W - p.W) / p.W < 0.25;   // small resizes: CSS scales the existing canvas
+      if (close || p.pending) continue;
+      if (!p.state) p.el.classList.add('loading');
+      p.pending = true; queue.push({ p, W }); pump();
+    }
+  }
+  function layout() {
+    const focus = document.body.classList.contains('focus');
+    const vw = innerWidth, vh = innerHeight;
+    if (CAP) { panels.forEach(p => { p.el.style.height = vh + 'px'; }); return; }
+    const vis = panels.filter(p => p.visible);
+    const padV = 72, gap = 14;
+    let h = vh - padV;
+    const maxW = (vw - 40 - gap * (vis.length - 1)) / vis.length;
+    if (h / 2 > maxW) h = maxW * 2;
+    vis.forEach(p => { p.el.style.height = h + 'px'; });
+  }
+  function setFocus(i) {
+    if (!i) { document.body.classList.remove('focus'); panels.forEach(p => { p.visible = true; p.el.classList.remove('on'); }); }
+    else { document.body.classList.add('focus'); panels.forEach(p => { p.visible = p.i === i; p.el.classList.toggle('on', p.i === i); }); }
+    layout(); sizeAll();
+  }
+  let rz = 0; addEventListener('resize', () => { layout(); clearTimeout(rz); rz = setTimeout(sizeAll, 220); });
+  if (window.ResizeObserver) new ResizeObserver(() => { clearTimeout(rz); rz = setTimeout(sizeAll, 220); }).observe(wall);
+  wall.addEventListener('click', e => {
+    const el = e.target.closest('.panel'); if (!el) return;
+    setFocus(document.body.classList.contains('focus') ? 0 : +el.dataset.i);
+  });
+  addEventListener('keydown', e => {
+    const cur = panels.find(p => p.el.classList.contains('on'));
+    if (e.key === 'Escape') setFocus(0);
+    else if (/^[1-4]$/.test(e.key)) setFocus(+e.key);
+    else if (e.key === 'ArrowRight' || e.key === 'ArrowLeft') {
+      const d = e.key === 'ArrowRight' ? 1 : -1;
+      const base = cur ? cur.i : (d > 0 ? 0 : 1);
+      setFocus(((base - 1 + d + 4) % 4) + 1);
+    }
+  });
+  // pointer, normalised -1..1 per panel (pieces may use for parallax)
+  const mouse = { x: 0, y: 0 };
+  addEventListener('pointermove', e => { mouse.x = e.clientX / innerWidth * 2 - 1; mouse.y = e.clientY / innerHeight * 2 - 1; });
+
+  layout(); sizeAll();
+  if (CAP) {
+    const c0 = performance.now();
+    for (const p of panels) p.P.draw(p.ctx, p.W, p.H, T0, p.state, { x: 0, y: 0, cap: true });
+    window.__MS = Math.round(performance.now() - c0);
+    if (Q.has('bench')) { const b0 = performance.now(); for (let k = 1; k <= 30; k++) for (const p of panels) p.P.draw(p.ctx, p.W, p.H, T0 + k / 60, p.state, { x: 0, y: 0 }); window.__BENCH = +((performance.now() - b0) / 30).toFixed(2);
+      for (const p of panels) p.P.draw(p.ctx, p.W, p.H, T0, p.state, { x: 0, y: 0, cap: true }); }
+    window.__READY = true; document.title = 'READY';
+    return;
+  }
+  const start = performance.now(); window.__T0 = start;
+  const m = { x: 0, y: 0 };
+  function frame(now) {
+    const t = T0 + (now - start) / 1000;
+    m.x += (mouse.x - m.x) * 0.04; m.y += (mouse.y - m.y) * 0.04;
+    requestAnimationFrame(frame);
+    for (const p of panels) {
+      if (!p.visible || !p.state || p.dead) continue;
+      try { p.P.draw(p.ctx, p.W, p.H, t, p.state, m); }
+      catch (e) { p.dead = true; p.el.classList.add('err'); p.el.dataset.err = 'poster failed: ' + (e && e.message || e); console.error(e); }
+    }
+  }
+  requestAnimationFrame(frame);
+  window.__READY = true;
+})();
+</script>
+</body>
+</html>
